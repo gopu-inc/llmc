@@ -1,111 +1,146 @@
+
 #include <stdlib.h>
 #include <math.h>
 #include <stdio.h>
-#include <string.h>
 #include <time.h>
 
 #define EMBED_DIM 64
-#define N_HEADS 4
 #define SEQ_LEN 10
 
 // Softmax simple
 void softmax(float* x, int n) {
-    if (n <= 0) return;
+    if (n == 0) return;
     
     float max = x[0];
+    for(int i = 1; i < n; i++) if(x[i] > max) max = x[i];
+    
     float sum = 0.0f;
-    
-    for(int i = 1; i < n; i++) {
-        if(x[i] > max) max = x[i];
-    }
-    
     for(int i = 0; i < n; i++) {
         x[i] = expf(x[i] - max);
         sum += x[i];
     }
     
+    for(int i = 0; i < n; i++) x[i] /= sum;
+}
+
+// LayerNorm simplifié
+void layer_norm(float* output, float* input, float* gamma, float* beta, int n) {
+    float mean = 0.0f;
+    float var = 0.0f;
+    
+    for(int i = 0; i < n; i++) mean += input[i];
+    mean /= n;
+    
     for(int i = 0; i < n; i++) {
-        x[i] /= sum;
+        float diff = input[i] - mean;
+        var += diff * diff;
+    }
+    var /= n;
+    
+    float inv_std = 1.0f / sqrtf(var + 1e-5f);
+    
+    for(int i = 0; i < n; i++) {
+        output[i] = (input[i] - mean) * inv_std * gamma[i] + beta[i];
     }
 }
 
-// Multiplication matricielle simple
-void matmul(float* out, float* a, float* b, int m, int n, int k) {
-    // out = a * b
-    // a: m x n, b: n x k, out: m x k
-    for(int i = 0; i < m; i++) {
-        for(int j = 0; j < k; j++) {
-            float sum = 0.0f;
-            for(int l = 0; l < n; l++) {
-                sum += a[i * n + l] * b[l * k + j];
-            }
-            out[i * k + j] = sum;
+// GELU activation
+float gelu(float x) {
+    return 0.5f * x * (1.0f + tanhf(0.7978845608028654f * (x + 0.044715f * x * x * x)));
+}
+
+// Feed Forward Network simple
+void feed_forward(float* output, float* input, float* W1, float* W2, 
+                  float* b1, float* b2, int dim, int hidden_dim) {
+    // hidden = gelu(input * W1 + b1)
+    // output = hidden * W2 + b2
+    
+    float* hidden = (float*)malloc(hidden_dim * sizeof(float));
+    
+    // hidden = input * W1 + b1
+    for(int i = 0; i < hidden_dim; i++) {
+        hidden[i] = b1[i];
+        for(int j = 0; j < dim; j++) {
+            hidden[i] += input[j] * W1[j * hidden_dim + i];
+        }
+        hidden[i] = gelu(hidden[i]);
+    }
+    
+    // output = hidden * W2 + b2
+    for(int i = 0; i < dim; i++) {
+        output[i] = b2[i];
+        for(int j = 0; j < hidden_dim; j++) {
+            output[i] += hidden[j] * W2[j * dim + i];
         }
     }
+    
+    free(hidden);
 }
 
-// Implémentation simple d'une tête d'attention
-void attention_head(float* output, float* Q, float* K, float* V, 
-                    int seq_len, int d_head) {
-    // Allouer mémoire pour les scores
-    float* scores = (float*)malloc(seq_len * seq_len * sizeof(float));
-    if (!scores) {
-        printf("Erreur d'allocation mémoire!\n");
-        return;
-    }
-    
-    // scores = Q * K^T / sqrt(d_head)
-    for(int i = 0; i < seq_len; i++) {
-        for(int j = 0; j < seq_len; j++) {
-            float sum = 0.0f;
-            for(int kk = 0; kk < d_head; kk++) {
-                sum += Q[i * d_head + kk] * K[j * d_head + kk];
-            }
-            scores[i * seq_len + j] = sum / sqrtf((float)d_head);
-        }
-    }
-    
-    // Softmax sur chaque ligne
-    for(int i = 0; i < seq_len; i++) {
-        softmax(&scores[i * seq_len], seq_len);
-    }
-    
-    // output = scores * V
-    matmul(output, scores, V, seq_len, seq_len, d_head);
-    
-    free(scores);
-}
-
-// Fonction principale REQUISE pour l'exécution
 int main() {
-    printf("=== Démarrage du Mini LLM en C ===\n");
+    printf("=== Mini Transformer en C ===\n");
+    srand(time(NULL));
     
-    srand(time(NULL)); // Initialisation du générateur aléatoire
+    // Dimensions
+    int dim = EMBED_DIM;
+    int seq_len = SEQ_LEN;
+    int hidden_dim = dim * 4;
     
-    int d_head = EMBED_DIM / N_HEADS;
+    printf("Configuration:\n");
+    printf("- Embedding dim: %d\n", dim);
+    printf("- Séquence length: %d\n", seq_len);
+    printf("- Hidden dim: %d\n\n", hidden_dim);
     
     // Allocation mémoire
-    float* input = (float*)malloc(SEQ_LEN * EMBED_DIM * sizeof(float));
-    float* output = (float*)malloc(SEQ_LEN * EMBED_DIM * sizeof(float));
+    float* input = (float*)malloc(dim * sizeof(float));
+    float* output = (float*)malloc(dim * sizeof(float));
+    float* gamma = (float*)malloc(dim * sizeof(float));
+    float* beta = (float*)malloc(dim * sizeof(float));
+    float* W1 = (float*)malloc(dim * hidden_dim * sizeof(float));
+    float* W2 = (float*)malloc(hidden_dim * dim * sizeof(float));
+    float* b1 = (float*)malloc(hidden_dim * sizeof(float));
+    float* b2 = (float*)malloc(dim * sizeof(float));
     
-    if (!input || !output) {
-        printf("Erreur d'allocation mémoire!\n");
-        return 1;
-    }
-    
-    // Initialisation aléatoire
-    printf("Initialisation des données...\n");
-    for(int i = 0; i < SEQ_LEN * EMBED_DIM; i++) {
+    // Initialisation aléatoire simple
+    for(int i = 0; i < dim; i++) {
         input[i] = ((float)rand() / RAND_MAX) * 2.0f - 1.0f;
-        output[i] = 0.0f;
+        gamma[i] = 1.0f;
+        beta[i] = 0.0f;
     }
     
-    printf("Dimensions:\n");
-    printf("  Longueur de séquence (SEQ_LEN): %d\n", SEQ_LEN);
-    printf("  Dimension d'embedding (EMBED_DIM): %d\n", EMBED_DIM);
-    printf("  Nombre de têtes (N_HEADS): %d\n", N_HEADS);
-    printf("  Dimension par tête (d_head): %d\n", d_head);
+    for(int i = 0; i < dim * hidden_dim; i++) W1[i] = ((float)rand() / RAND_MAX) * 0.1f;
+    for(int i = 0; i < hidden_dim * dim; i++) W2[i] = ((float)rand() / RAND_MAX) * 0.1f;
+    for(int i = 0; i < hidden_dim; i++) b1[i] = ((float)rand() / RAND_MAX) * 0.1f;
+    for(int i = 0; i < dim; i++) b2[i] = ((float)rand() / RAND_MAX) * 0.1f;
     
-    printf("\nCalcul de l'attention...\n");
+    // Test LayerNorm
+    printf("Test LayerNorm:\n");
+    layer_norm(output, input, gamma, beta, dim);
+    printf("Input[0]: %.3f, Output[0]: %.3f\n\n", input[0], output[0]);
     
-    // Calcul pour une seule tête
+    // Test GELU
+    printf("Test GELU:\n");
+    for(int i = 0; i < 3; i++) {
+        float x = i - 1.0f;
+        printf("gelu(%.1f) = %.3f\n", x, gelu(x));
+    }
+    printf("\n");
+    
+    // Test Feed Forward
+    printf("Test Feed Forward Network:\n");
+    feed_forward(output, input, W1, W2, b1, b2, dim, hidden_dim);
+    printf("FFN Output[0]: %.3f\n", output[0]);
+    
+    // Libération mémoire
+    free(input);
+    free(output);
+    free(gamma);
+    free(beta);
+    free(W1);
+    free(W2);
+    free(b1);
+    free(b2);
+    
+    printf("\n=== Programme terminé avec succès ===\n");
+    return 0;
+}
